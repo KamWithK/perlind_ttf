@@ -2264,12 +2264,23 @@ generate_curves_from_ttf_contours :: proc(max_potential_length: i64, coords: [][
     max: [2]f32 = math.NEG_INF_F32
     for c in result {
         min = linalg.min(min, c.p0)
-        min = linalg.min(min, c.p1)
         min = linalg.min(min, c.p2)
 
         max = linalg.max(max, c.p0)
-        max = linalg.max(max, c.p1)
         max = linalg.max(max, c.p2)
+
+        #unroll for axis in 0..<2 {
+            denom := c.p0[axis] - 2*c.p1[axis] + c.p2[axis]
+            if abs(denom) > 1e-6 {
+                t := (c.p0[axis] - c.p1[axis]) / denom
+                if t > 0 && t < 1 {
+                    mt := 1.0 - t
+                    extreme := mt*mt*c.p0[axis] + 2*mt*t*c.p1[axis] + t*t*c.p2[axis]
+                    if extreme < min[axis] { min[axis] = extreme }
+                    if extreme > max[axis] { max[axis] = extreme }
+                }
+            }
+        }
     }
     dim := max - min
     if normalize {
