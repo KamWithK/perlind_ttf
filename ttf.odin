@@ -319,7 +319,7 @@ Ttf_Table_Horizontal_Header :: struct #packed {
     _: i16be,
     _: i16be,
     metric_data_format: i16be,
-    number_of_h_metrics: i16be,
+    number_of_h_metrics: u16be,
 }
 
 Ttf_Table_Vertical_Header :: struct #packed {
@@ -339,7 +339,7 @@ Ttf_Table_Vertical_Header :: struct #packed {
     _: i16be,
     _: i16be,
     metric_data_format: i16be,
-    number_of_v_metrics: i16be,
+    number_of_v_metrics: u16be,
 }
 
 Ttf_Table_Maxp_0_Dot_5 :: struct #packed {
