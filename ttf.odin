@@ -18,7 +18,7 @@ Ttf_u16 :: u16be
 Ttf_i32 :: i32be
 Ttf_i16 :: i16be
 Ttf_Offset16 :: u16be
-Ttf_Offset32 :: u16be
+Ttf_Offset32 :: u32be
 Ttf_Version16Dot16 :: u32be
 
 Cff_Card8 :: u8
