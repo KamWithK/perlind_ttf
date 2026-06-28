@@ -66,6 +66,12 @@ Ttf_Font :: struct {
     hinting_twilight_points_size: i32,
     hinting_op_ptrs: [][]byte,
 
+    has_color: bool,
+    base_glyphs: Base_Glyph_Result,
+    layers: []Layer_Info,
+    palette_indices: []u16,
+    colors: [][4]f32,
+
     arena: ^Arena,
 }
 
@@ -461,6 +467,30 @@ Cff_Header_Table :: struct #packed {
     offsize: Cff_Offsize
 }
 
+Otf_Table_COLR_Header :: struct #packed {
+    version: u16be,
+    num_base_glyph_records: u16be,
+    base_glyph_records_offset: Ttf_Offset32,
+    layer_records_offset: Ttf_Offset32,
+    num_layer_records: u16be,
+}
+Otf_Table_CPAL_Header :: struct #packed {
+    version: u16be,
+    num_palette_entries: u16be,
+    num_palettes: u16be,
+    num_color_records: u16be,
+    color_records_offset: Ttf_Offset32,
+}
+Otf_Base_Glyph_Record :: struct #packed {
+    glyph_id: u16be,
+    first_layer: u16be,
+    num_layers: u16be,
+}
+Otf_Layer_Record :: struct #packed {
+    glyph_id: u16be,
+    palette_index: u16be,
+}
+
 Ttf_Tag :: enum {
     unknown, // NOTE(lucas): not an actual table 
     cmap,
@@ -481,6 +511,8 @@ Ttf_Tag :: enum {
     prep,
     GPOS,
     CFF,
+    COLR,
+    CPAL,
 }
 Ttf_Tags :: distinct bit_set[Ttf_Tag]
 TTF_REQUIRED_TABLES :: Ttf_Tags {
@@ -526,6 +558,8 @@ ttf_u32_to_tag :: proc(tag: Ttf_u32) -> Ttf_Tag {
     case 0x70726570: return .prep
     case 0x6670676D: return .fpgm
     case 0x4F532F32: return .os2
+    case 0x434F4C52: return .COLR
+    case 0x4350414C: return .CPAL
     }
     return .unknown
 }
@@ -1879,6 +1913,79 @@ ttf_parse_cff_table :: proc(ctx: ^Ttf_Read_Context, table: Ttf_Table_Blob, maxp:
     return result, ctx.ok
 }
 
+Base_Glyph_Info :: struct #packed {
+    first_layer: u16,
+    num_layers: u16,
+}
+Layer_Info :: struct #packed {
+    glyph_id: u16,
+    palette: u16,
+}
+Base_Glyph_Result :: map[u16]Base_Glyph_Info
+ttf_parse_colr_table :: proc(ctx: ^Ttf_Read_Context, table: Ttf_Table_Blob, allocator: mem.Allocator) -> (base_glyphs: Base_Glyph_Result, layers: []Layer_Info, ok := false) {
+    if !table.valid {
+        log.error("[Ttf parser] Bad colr table")
+        ctx.ok = false
+    }
+
+    // NOTE(kam): only v0 fields are read, may not be populated for v1 fonts
+    reader := Ttf_Reader { ctx, table.data, 0 }
+    result, _ := ttf_read_t_ptr(Otf_Table_COLR_Header, &reader)
+
+    reader.offset = 0
+    base_glyphs = make(Base_Glyph_Result, result.num_base_glyph_records, allocator)
+    if ttf_read_bytes_copy(&reader, i64(result.base_glyph_records_offset), nil) {
+        for index in 0 ..< result.num_base_glyph_records {
+            base_glyph := ttf_read_t_copy(Otf_Base_Glyph_Record, &reader)
+            base_glyphs[u16(base_glyph.glyph_id)] = {
+                first_layer = u16(base_glyph.first_layer),
+                num_layers = u16(base_glyph.num_layers),
+            }
+        }
+    }
+
+    reader.offset = 0
+    layers = make([]Layer_Info, result.num_layer_records, allocator)
+    if ttf_read_bytes_copy(&reader, i64(result.layer_records_offset), nil) {
+        for index in 0 ..< result.num_layer_records {
+            layer := ttf_read_t_copy(Otf_Layer_Record, &reader)
+            layers[index] = {
+                glyph_id = u16(layer.glyph_id),
+                palette = u16(layer.palette_index),
+            }
+        }
+    }
+
+    return base_glyphs, layers, ctx.ok
+}
+ttf_parse_cpal_table :: proc(ctx: ^Ttf_Read_Context, table: Ttf_Table_Blob, allocator: mem.Allocator) -> (palette_indices: []u16, colors: [][4]f32, ok := false) {
+    if !table.valid {
+        log.error("[Ttf parser] Bad cpal table")
+        ctx.ok = false
+        return
+    }
+
+    // NOTE(kam): only v0 fields are read, v1 will populate them too
+    reader := Ttf_Reader { ctx, table.data, 0 }
+    result, _ := ttf_read_t_ptr(Otf_Table_CPAL_Header, &reader)
+    raw_palette_indices := ttf_read_t_slice(u16be, &reader, i64(result.num_palettes))
+    palette_indices = make([]u16, len(raw_palette_indices), allocator)
+    for palette_index, index in raw_palette_indices {
+        palette_indices[index] = u16(palette_index)
+    }
+
+    reader.offset = 0
+    ttf_read_bytes_copy(&reader, i64(result.color_records_offset), nil) or_return
+
+    colors = make([][4]f32, result.num_color_records, allocator)
+    for index in 0..< result.num_color_records {
+        bgra_colors := ttf_read_t_copy([4]u8, &reader)
+        colors[index] = ([4]f32)(bgra_colors.bgra) / 255
+    }
+
+    return palette_indices, colors, ctx.ok
+}
+
 ttf_from_data :: proc(data: []byte, allocator: mem.Allocator) -> (_result: ^Ttf_Font, _ok: bool) {
     allocator := allocator
     arena, arena_err := arena_make(size = i64(len(data)) * 4, backing_allocator = allocator)
@@ -2029,6 +2136,17 @@ ttf_from_data :: proc(data: []byte, allocator: mem.Allocator) -> (_result: ^Ttf_
         hinter_program_ttf_execute(&program_ctx)
     }
 
+    COLOR_TABLES :: Ttf_Tags { .COLR, .CPAL }
+    has_color := COLOR_TABLES & parsed_table_tags == COLOR_TABLES
+    base_glyphs: Base_Glyph_Result
+    layers: []Layer_Info
+    palette_indices: []u16
+    colors: [][4]f32
+    if has_color {
+        base_glyphs, layers = ttf_parse_colr_table(&ctx, parsed_table_data[.COLR], allocator) or_return
+        palette_indices, colors = ttf_parse_cpal_table(&ctx, parsed_table_data[.CPAL], allocator) or_return
+    }
+
     result := new_clone(Ttf_Font {
         codepoint_to_glyph_index_map,
         glyphs,
@@ -2045,6 +2163,12 @@ ttf_from_data :: proc(data: []byte, allocator: mem.Allocator) -> (_result: ^Ttf_
         hinting_storage_size,
         hinting_twilight_points_size,
         hinting_op_ptrs,
+
+        has_color,
+        base_glyphs,
+        layers,
+        palette_indices,
+        colors,
 
         arena,
     }, arena)
